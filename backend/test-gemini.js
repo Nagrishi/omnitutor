@@ -1,7 +1,8 @@
+require('dotenv').config();
 const WebSocket = require('ws');
 
-const GEMINI_API_KEY = "AIzaSyCGdWhku8wpTZ-GZRGLZVd6M-jy35V8uYM";
-const GEMINI_WS_URL = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${GEMINI_API_KEY}`;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const GEMINI_WS_URL = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${GEMINI_API_KEY}`
 
 const geminiWs = new WebSocket(GEMINI_WS_URL);
 
