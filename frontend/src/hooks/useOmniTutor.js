@@ -15,13 +15,8 @@ export function useOmniTutor() {
   const canvasRef = useRef(null);
   
   const frameIntervalRef = useRef(null);
- 
   const mediaRecorderRef = useRef(null);
   const nextPlaybackTimeRef = useRef(0);
-  const processorRef = useRef(null);
-  const inputAudioContextRef = useRef(null);
-  const nextAudioTimeRef = useRef(0);
-
 
   const connect = useCallback(() => {
     if (wsRef.current) return;
@@ -91,7 +86,6 @@ export function useOmniTutor() {
  
 
   const stopMediaStreams = () => {
-
     if (frameIntervalRef.current) clearInterval(frameIntervalRef.current);
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       mediaRecorderRef.current.stop();
@@ -152,129 +146,6 @@ export function useOmniTutor() {
     currentSourceRef.current = source;
     source.start(scheduleTime);
 nextPlaybackTimeRef.current = scheduleTime + buffer.duration;
-      if (frameIntervalRef.current) clearInterval(frameIntervalRef.current);
-      if (processorRef.current) {
-          processorRef.current.disconnect();
-          processorRef.current = null;
-      }
-      if (inputAudioContextRef.current) {
-          inputAudioContextRef.current.close();
-          inputAudioContextRef.current = null;
-      }
-      if (mediaStreamRef.current) mediaStreamRef.current.getTracks().forEach(t => t.stop());
-      if (audioStreamRef.current) audioStreamRef.current.getTracks().forEach(t => t.stop());
-      setIsMicActive(false);
-      setIsScreenSharing(false);
-  };
-
-  const playAudioChunk = async (base64Audio) => {
-      if (!audioContextRef.current) {
-          audioContextRef.current = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
-      }
-      
-      const audioCtx = audioContextRef.current;
-      if (audioCtx.state === 'suspended') {
-          audioCtx.resume();
-      }
-      
-      const binaryString = window.atob(base64Audio);
-      const len = binaryString.length;
-      const bytes = new Uint8Array(len);
-      for (let i = 0; i < len; i++) {
-          bytes[i] = binaryString.charCodeAt(i);
-      }
-      
-      try {
-          // Gemini returns raw PCM 16-bit 24kHz
-          const pcm16Data = new Int16Array(bytes.buffer);
-          const float32Data = new Float32Array(pcm16Data.length);
-          for (let i = 0; i < pcm16Data.length; i++) {
-              float32Data[i] = pcm16Data[i] / 32768;
-          }
-          
-          const audioBuffer = audioCtx.createBuffer(1, float32Data.length, 24000);
-          audioBuffer.getChannelData(0).set(float32Data);
-          
-          const source = audioCtx.createBufferSource();
-          source.buffer = audioBuffer;
-          source.connect(audioCtx.destination);
-          
-          const currentTime = audioCtx.currentTime;
-          const startTime = Math.max(currentTime, nextAudioTimeRef.current);
-          source.start(startTime);
-          nextAudioTimeRef.current = startTime + audioBuffer.duration;
-      } catch (e) {
-          console.error("Audio playback error:", e);
-      }
-  };
-
-  const startMic = async () => {
-      try {
-          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-          audioStreamRef.current = stream;
-          setIsMicActive(true);
-          
-          if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-              console.warn("Connect agent first.");
-          }
-          
-          const audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-          inputAudioContextRef.current = audioCtx;
-          const source = audioCtx.createMediaStreamSource(stream);
-          const processor = audioCtx.createScriptProcessor(4096, 1, 1);
-          
-          processor.onaudioprocess = (e) => {
-              if (wsRef.current?.readyState === WebSocket.OPEN) {
-                  const inputData = e.inputBuffer.getChannelData(0);
-                  const pcmData = new Int16Array(inputData.length);
-                  for (let i = 0; i < inputData.length; i++) {
-                      let s = Math.max(-1, Math.min(1, inputData[i]));
-                      pcmData[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-                  }
-                  
-                  const bytes = new Uint8Array(pcmData.buffer);
-                  let binary = '';
-                  const chunkSize = 8192;
-                  for (let i = 0; i < bytes.length; i += chunkSize) {
-                      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
-                  }
-                  const base64Audio = btoa(binary);
-                  
-                  wsRef.current.send(JSON.stringify({
-                      realtimeInput: { mediaChunks: [{ mimeType: "audio/pcm;rate=16000", data: base64Audio }] }
-                  }));
-              }
-          };
-          
-          source.connect(processor);
-          processor.connect(audioCtx.destination);
-          processorRef.current = processor;
-          
-      } catch (err) {
-          console.error("Failed to start mic", err);
-      }
-  };
-  const startScreenShare = async () => {
-      try {
-          const stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: { ideal: 10 } } });
-          setIsScreenSharing(true);
-          mediaStreamRef.current = stream;
-          if (videoRef.current) {
-              videoRef.current.srcObject = stream;
-              
-              // Start frame extraction loop
-              if (!canvasRef.current) {
-                  canvasRef.current = document.createElement('canvas');
-              }
-              // Send a frame every 1 second
-              frameIntervalRef.current = setInterval(() => {
-                  captureAndSendFrame();
-              }, 1000);
-          }
-      } catch (err) {
-          console.error("Failed to share screen:", err);
-      }
-
   };
 
   const startMic = async () => {
