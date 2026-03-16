@@ -14,7 +14,7 @@ geminiWs.on('open', () => {
             model: "models/gemini-2.5-flash-native-audio-latest",
             systemInstruction: {
                 parts: [{
-                    text: "You are OmniTutor, a helpful AI tutor. You can see the user's screen or camera and hear them. Respond in short, conversational sentences and help them step-by-step."
+                    text: "You are a helpful AI tutor. You can see the user's screen and hear them. Respond in short, conversational sentences and help them step-by-step."
                 }]
             },
             generationConfig: {

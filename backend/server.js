@@ -14,7 +14,6 @@ const wss = new WebSocket.Server({ server });
 
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-
 // The endpoint for the Gemini Live API
 const GEMINI_WS_URL = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${GEMINI_API_KEY}`;
 
@@ -43,11 +42,12 @@ wss.on('connection', (clientWs) => {
                     model: "models/gemini-2.5-flash-native-audio-latest",
                     systemInstruction: {
                         parts: [{
-                            text: "You are OmniTutor, a helpful AI tutor. You can see the user's screen or camera and hear them. Respond in short, conversational sentences and help them step-by-step."
+                            text: "You are OmniTutor, a helpful AI tutor. You can see the user's screen or camera and hear them. Respond in short, conversational sentences and help them step-by-step. Be concise but complete — never cut off mid-thought."
                         }]
                     },
                     generationConfig: {
                         responseModalities: ["AUDIO"],
+                        temperature: 0.7,
                         speechConfig: {
                             voiceConfig: {
                                 prebuiltVoiceConfig: {
@@ -58,19 +58,27 @@ wss.on('connection', (clientWs) => {
                     }
                 }
             };
-            geminiWs.send(JSON.stringify(setupMessage));
+            if (geminiWs.readyState === WebSocket.OPEN) {
+                 geminiWs.send(JSON.stringify(setupMessage));
+}
         });
 
-    geminiWs.on("message", (data) => {
+    let setupLogged = false;
 
-    const msg = data.toString();
+        geminiWs.on("message", (data) => {
 
-    if (msg.includes("setupComplete")) {
-        console.log("Gemini setup completed");
+          if (!setupLogged) {
+            try {
+            const msg = JSON.parse(data.toString());
+            if (msg.setupComplete) {
+                console.log("Gemini setup completed");
+                setupLogged = true;
+            }
+        }   catch {}
     }
 
     if (clientWs.readyState === WebSocket.OPEN) {
-        clientWs.send(msg);
+        clientWs.send(data.toString());
     }
 
 });
@@ -108,7 +116,7 @@ geminiWs.on('close', (code, reason) => {
     clientWs.on('message', (message) => {
         try {
             if (geminiWs && geminiWs.readyState === WebSocket.OPEN) {
-                geminiWs.send(message.toString());
+                geminiWs.send(message);
             }
         } catch (e) {
             console.error("Error forwarding message to Gemini:", e);

@@ -4,25 +4,28 @@ export function useOmniTutor() {
   const [isConnected, setIsConnected] = useState(false);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [isMicActive, setIsMicActive] = useState(false);
-  
+
   const wsRef = useRef(null);
   const audioContextRef = useRef(null);
   const mediaStreamRef = useRef(null);
   const audioStreamRef = useRef(null);
+  const workletLoadedRef = useRef(false);
+  const turnEndedRef = useRef(false);
+  const userSpeakingRef = useRef(false);
   const silenceTimerRef = useRef(null);
   const currentSourceRef = useRef(null);
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
-  
+
   const frameIntervalRef = useRef(null);
   const mediaRecorderRef = useRef(null);
   const nextPlaybackTimeRef = useRef(0);
 
   const connect = useCallback(() => {
     if (wsRef.current) return;
-    
+
     wsRef.current = new WebSocket('ws://localhost:5000');
-    
+
     wsRef.current.onopen = () => {
       console.log('Connected to backend proxy');
       if (!audioContextRef.current) {
@@ -35,20 +38,31 @@ export function useOmniTutor() {
       }
       setIsConnected(true);
     };
-    
-    wsRef.current.onmessage = async (event) => {
-      let response;
 
-      try {
-        response = JSON.parse(event.data);
-      } catch {
-        console.warn("Invalid JSON from backend");
+    wsRef.current.onmessage = async (event) => {
+
+      let text;
+
+      if (typeof event.data === "string") {
+        text = event.data;
+      } else if (event.data instanceof Blob) {
+        text = await event.data.text();
+      } else {
         return;
       }
 
-      if (response.serverContent?.modelTurn) {
-        const parts = response.serverContent.modelTurn.parts;
+      let response;
 
+      try {
+        response = JSON.parse(text);
+      } catch {
+        return;
+      }
+
+      if (response.serverContent?.modelTurn?.parts) {
+
+        const parts = response.serverContent.modelTurn.parts;
+        turnEndedRef.current = false;
         for (const part of parts) {
           if (part.inlineData?.data) {
             playAudioChunk(part.inlineData.data);
@@ -56,19 +70,19 @@ export function useOmniTutor() {
         }
       }
     };
-    
+
     wsRef.current.onclose = () => {
       console.log('Disconnected');
       setIsConnected(false);
       wsRef.current = null;
     };
-    
+
     wsRef.current.onerror = (err) => {
       console.error("WebSocket error:", err);
     };
   }, []); // Fixed: Added missing closing bracket for useCallback
-  
-   const disconnect = useCallback(() => {
+
+  const disconnect = useCallback(() => {
     if (wsRef.current) {
       wsRef.current.close();
       wsRef.current = null;
@@ -83,7 +97,7 @@ export function useOmniTutor() {
     };
   }, [disconnect]); // Added disconnect to dependencies
 
- 
+
 
   const stopMediaStreams = () => {
     if (frameIntervalRef.current) clearInterval(frameIntervalRef.current);
@@ -106,8 +120,14 @@ export function useOmniTutor() {
     const audioCtx = audioContextRef.current;
 
     // Decode base64
-    const binaryString = window.atob(base64Audio);
-    const bytes = Uint8Array.from(binaryString, c => c.charCodeAt(0));
+    const binaryString = atob(base64Audio);
+    const len = binaryString.length;
+
+    const bytes = new Uint8Array(len);
+
+    for (let i = 0; i < len; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
 
     // PCM16 → Float32
     const pcm16 = new Int16Array(bytes.buffer);
@@ -129,9 +149,9 @@ export function useOmniTutor() {
     const source = audioCtx.createBufferSource();
     source.buffer = buffer;
     source.connect(audioCtx.destination);
-   if (audioCtx.state === "suspended") {
-        audioCtx.resume().catch(() => {});
-}
+    if (audioCtx.state === "suspended") {
+      audioCtx.resume().catch(() => { });
+    }
 
     // 🔑 Smooth scheduling
     const now = audioCtx.currentTime;
@@ -140,17 +160,29 @@ export function useOmniTutor() {
       nextPlaybackTimeRef.current = now;
     }
     const scheduleTime = Math.max(
-    nextPlaybackTimeRef.current,
-    audioCtx.currentTime + 0.05
-);
+      nextPlaybackTimeRef.current,
+      audioCtx.currentTime + 0.05
+    );
     currentSourceRef.current = source;
     source.start(scheduleTime);
-nextPlaybackTimeRef.current = scheduleTime + buffer.duration;
+    nextPlaybackTimeRef.current = scheduleTime + buffer.duration;
   };
+
+  //   function stopAiSpeech() {
+
+  //   if (currentSourceRef.current) {
+  //     try {
+  //       currentSourceRef.current.stop();
+  //     } catch {}
+  //     currentSourceRef.current = null;
+  //   }
+
+  //   nextPlaybackTimeRef.current = 0;
+  // }
 
   const startMic = async () => {
     try {
-       if (isMicActive) return;
+      if (isMicActive) return;
       if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
         console.warn("Connect agent first.");
         return;
@@ -160,37 +192,51 @@ nextPlaybackTimeRef.current = scheduleTime + buffer.duration;
 
       audioStreamRef.current = stream;
       setIsMicActive(true);
+      turnEndedRef.current = false;
 
-      const audioContext = audioContextRef.current || new AudioContext({ sampleRate: 16000 });
+      const audioContext = audioContextRef.current || new AudioContext({ sampleRate: 24000 });
       audioContextRef.current = audioContext;
 
+      if (audioContext.state === "suspended") {
+        await audioContext.resume();
+      }
+      if (!workletLoadedRef.current) {
+        await audioContext.audioWorklet.addModule("/mic-processor.js");
+        workletLoadedRef.current = true;
+      }
       const source = audioContext.createMediaStreamSource(stream);
+      const workletNode = new AudioWorkletNode(audioContext, "mic-processor");
 
-      const processor = audioContext.createScriptProcessor(2048, 1, 1);
+      source.connect(workletNode);
+      const silentGain = audioContext.createGain();
+      silentGain.gain.value = 0;
 
-      source.connect(processor);
-      processor.connect(audioContext.destination);
+      workletNode.connect(silentGain);
+      silentGain.connect(audioContext.destination);
 
-      processor.onaudioprocess = (event) => {
-          const input = event.inputBuffer.getChannelData(0);
+      workletNode.port.onmessage = (event) => {
 
-      // 🎤 Calculate microphone energy
-        let energy = 0;
-      for (let i = 0; i < input.length; i++) {
-        energy += Math.abs(input[i]);
-  }
+        const input = event.data;
 
-       energy = energy / input.length;
+        // detect if user started speaking
+        const isSpeaking = input.some(v => Math.abs(v) > 0.04);
 
-  // 🛑 BARGE-IN only if user actually speaks
-      if (energy > 0.02 && currentSourceRef.current) {
-      try {
-       currentSourceRef.current.stop();
-          } catch {}
+        // interrupt AI ONLY once when speech begins
+        if (isSpeaking && !userSpeakingRef.current) {
+          userSpeakingRef.current = true;
 
-      currentSourceRef.current = null;
-      nextPlaybackTimeRef.current = 0;
-  }
+          if (currentSourceRef.current) {
+            try { currentSourceRef.current.stop(); } catch { }
+            currentSourceRef.current = null;
+          }
+
+          nextPlaybackTimeRef.current = 0;
+        }
+
+        // reset speaking flag when silent
+        if (!isSpeaking) {
+          userSpeakingRef.current = false;
+        }
 
         const pcm16 = new Int16Array(input.length);
 
@@ -198,29 +244,37 @@ nextPlaybackTimeRef.current = scheduleTime + buffer.duration;
           pcm16[i] = Math.max(-1, Math.min(1, input[i])) * 32767;
         }
 
-       const uint8 = new Uint8Array(pcm16.buffer);
-       let binary = "";
-       for (let i = 0; i < uint8.length; i++) {
-        binary += String.fromCharCode(uint8[i]);
-}
-       const base64 = btoa(binary);
+        const uint8 = new Uint8Array(pcm16.buffer);
+
+        let binary = "";
+        const chunkSize = 0x6000; // 24KB chunks
+
+        for (let i = 0; i < uint8.length; i += chunkSize) {
+          const subarray = uint8.subarray(i, i + chunkSize);
+          binary += String.fromCharCode(...subarray);
+        }
+        const base64 = btoa(binary);
 
         if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+
           wsRef.current.send(
             JSON.stringify({
               realtimeInput: {
                 mediaChunks: [
                   {
-                    mimeType: "audio/pcm",
+                    mimeType: "audio/pcm;rate=16000",
                     data: base64
                   }
                 ]
               }
             })
           );
-        //  silence detection timer
+
+          // Always reset silence timer on every chunk so it fires after
+          // the user goes truly silent (not just mid-speech)
           resetSilenceTimer();
         }
+
       };
 
       console.log("Microphone streaming started");
@@ -230,49 +284,50 @@ nextPlaybackTimeRef.current = scheduleTime + buffer.duration;
     }
   };
 
-function resetSilenceTimer() {
+  function resetSilenceTimer() {
 
-  if (silenceTimerRef.current) {
-    clearTimeout(silenceTimerRef.current);
-  }
-
-  silenceTimerRef.current = setTimeout(() => {
-
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-
-      console.log("Silence detected → AI responding");
-
-      wsRef.current.send(JSON.stringify({
-        realtimeInput: {
-          audio: {
-            endOfStream: true
-          }
-        }
-      }));
-
-      silenceTimerRef.current = null;
-
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
     }
 
-  }, 1500);
-}
+    silenceTimerRef.current = setTimeout(() => {
+
+      if (
+        wsRef.current?.readyState === WebSocket.OPEN &&
+        !turnEndedRef.current
+      ) {
+
+        console.log("Silence detected → AI responding");
+
+        wsRef.current.send(JSON.stringify({
+          realtimeInput: {
+            audioStreamEnd: true
+          }
+        }));
+
+        turnEndedRef.current = true;
+        silenceTimerRef.current = null;
+      }
+
+    }, 200);
+  }
 
   const startScreenShare = async () => {
     try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({ 
-        video: { frameRate: { ideal: 10 } } 
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: { frameRate: { ideal: 10 } }
       });
-      
+
       stream.getVideoTracks()[0].onended = () => {
         stopMediaStreams();
       };
 
       setIsScreenSharing(true);
       mediaStreamRef.current = stream;
-      
+
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
-        
+
         // Start frame extraction loop
         if (!canvasRef.current) {
           canvasRef.current = document.createElement('canvas');
@@ -280,7 +335,7 @@ function resetSilenceTimer() {
         // Send a frame every 1 second
         frameIntervalRef.current = setInterval(() => {
           captureAndSendFrame();
-        }, 3000);
+        }, 1000);
       }
     } catch (err) {
       console.error("Failed to share screen:", err);
@@ -289,13 +344,13 @@ function resetSilenceTimer() {
 
   const captureAndSendFrame = () => {
     if (!videoRef.current || !canvasRef.current || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-    
+
     const video = videoRef.current;
     const canvas = canvasRef.current;
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
     const ctx = canvas.getContext('2d');
-    
+
     if (video.videoWidth > 0 && video.videoHeight > 0) {
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
       const base64Img = canvas.toDataURL('image/jpeg', 0.15).split(',')[1];
