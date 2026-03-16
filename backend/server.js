@@ -14,7 +14,6 @@ const wss = new WebSocket.Server({ server });
 
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-
 // The endpoint for the Gemini Live API
 const GEMINI_WS_URL = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${GEMINI_API_KEY}`;
 
@@ -43,11 +42,12 @@ wss.on('connection', (clientWs) => {
                     model: "models/gemini-2.5-flash-native-audio-latest",
                     systemInstruction: {
                         parts: [{
-                            text: "You are OmniTutor, a helpful AI tutor. You can see the user's screen or camera and hear them. Respond in short, conversational sentences and help them step-by-step."
+                            text: "You are OmniTutor, a warm, natural AI tutor. You can see the user's screen and hear them. Speak in short, conversational sentences. Be concise but never cut off mid-thought. React naturally to interruptions — if the user speaks while you're talking, stop and listen immediately."
                         }]
                     },
                     generationConfig: {
                         responseModalities: ["AUDIO"],
+                        temperature: 0.7,
                         speechConfig: {
                             voiceConfig: {
                                 prebuiltVoiceConfig: {
@@ -55,37 +55,60 @@ wss.on('connection', (clientWs) => {
                                 }
                             }
                         }
+                    },
+                    // 🔑 Server-side VAD: Gemini detects speech automatically and
+                    // sends `interrupted` + `turnComplete` signals — no need for
+                    // the client to send manual audioStreamEnd messages.
+                    realtimeInputConfig: {
+                        automaticActivityDetection: {
+                            disabled: false,
+                            // Lower sensitivity = less false triggers from env noise
+                            startOfSpeechSensitivity: "START_SENSITIVITY_LOW",
+                            endOfSpeechSensitivity: "END_SENSITIVITY_LOW",
+                            prefixPaddingMs: 20,
+                            silenceDurationMs: 800  // wait longer before assuming speech ended
+                        }
                     }
                 }
             };
-            geminiWs.send(JSON.stringify(setupMessage));
+            if (geminiWs.readyState === WebSocket.OPEN) {
+                 geminiWs.send(JSON.stringify(setupMessage));
+}
         });
 
-    geminiWs.on("message", (data) => {
+    let setupLogged = false;
 
-    const msg = data.toString();
+        geminiWs.on("message", (data) => {
 
-    if (msg.includes("setupComplete")) {
-        console.log("Gemini setup completed");
+          if (!setupLogged) {
+            try {
+            const msg = JSON.parse(data.toString());
+            if (msg.setupComplete) {
+                console.log("Gemini setup completed");
+                setupLogged = true;
+            }
+        }   catch {}
     }
 
     if (clientWs.readyState === WebSocket.OPEN) {
-        clientWs.send(msg);
+        clientWs.send(data.toString());
     }
 
 });
 
 geminiWs.on('close', (code, reason) => {
-
+    // Print the exact reason buffer as a string so we can see the Gemini error payload
     const reasonText = reason ? reason.toString() : "No reason";
-
-    console.log("Gemini connection closed.", code, reasonText);
+    console.log("=========================================");
+    console.log("Gemini connection closed.", code);
+    console.log("REASON STRING:", reasonText);
+    console.log("=========================================");
 
     if (clientWs.readyState === WebSocket.OPEN) {
         clientWs.send(JSON.stringify({
-            error: "Gemini connection closed"
+            error: "Gemini connection closed",
+            details: reasonText
         }));
-
         clientWs.close();
     }
 });
@@ -108,7 +131,7 @@ geminiWs.on('close', (code, reason) => {
     clientWs.on('message', (message) => {
         try {
             if (geminiWs && geminiWs.readyState === WebSocket.OPEN) {
-                geminiWs.send(message.toString());
+                geminiWs.send(message);
             }
         } catch (e) {
             console.error("Error forwarding message to Gemini:", e);
